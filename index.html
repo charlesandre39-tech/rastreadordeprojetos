@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gantt Tracker — ETP</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0D1117;color:#E6EDF3;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;height:100vh}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#0D1117}
+::-webkit-scrollbar-thumb{background:#30363D;border-radius:3px}
+input,textarea,button{font-family:inherit}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+// Token lido do navegador — nunca fica no código
+const GH_OWNER  = "charlesandre39-tech";
+const GH_REPO   = "rastreadordeprojetos";
+const GH_PATH   = "projects.json";
+const GH_BRANCH = "main";
+
+function getToken(){ return localStorage.getItem("gh_gantt_token")||""; }
+
+async function ghLoad() {
+  const token = getToken(); if(!token) return null;
+  const r = await fetch(
+    `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}?ref=${GH_BRANCH}&t=${Date.now()}`,
+    { headers:{ Authorization:`token ${token}`, Accept:"application/vnd.github.v3+json" } }
+  );
+  if(!r.ok) return null;
+  const d = await r.json();
+  const parsed = JSON.parse(atob(d.content.replace(/\n/g,"")));
+  return { data: Array.isArray(parsed)&&parsed.length ? parsed : null, sha: d.sha };
+}
+
+async function ghSave(projects, sha) {
+  const token = getToken();
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(projects,null,2))));
+  const body = { message:`Atualiza projects.json — ${new Date().toLocaleString("pt-BR")}`, content, branch:GH_BRANCH, ...(sha?{sha}:{}) };
+  const r = await fetch(
+    `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`,
+    { method:"PUT", headers:{ Authorization:`token ${token}`, Accept:"application/vnd.github.v3+json", "Content-Type":"application/json" }, body:JSON.stringify(body) }
+  );
+  if(!r.ok){ const e=await r.json(); throw new Error(e.message); }
+  return (await r.json()).content.sha;
+}
+
+const C={bg:"#0D1117",surface:"#161B22",border:"#21262D",borderStrong:"#30363D",text:"#E6EDF3",textMuted:"#8B949E",textDim:"#484F58",today:"#F85149",accent:"#58A6FF",success:"#3FB950",warning:"#D29922",danger:"#F85149",purple:"#BC8CFF"};
+const STATUS={pending:{color:C.textDim,label:"Não iniciado"},running:{color:C.accent,label:"Em andamento"},done:{color:C.success,label:"Concluído"},late:{color:C.danger,label:"Atrasado"},risk:{color:C.warning,label:"Em risco"}};
+const LOG_TAGS=[{id:"delay",icon:"⚠",label:"Atraso",color:"#F85149"},{id:"block",icon:"🔒",label:"Bloqueio",color:"#D29922"},{id:"done",icon:"✅",label:"Entrega",color:"#3FB950"},{id:"note",icon:"💬",label:"Nota",color:"#58A6FF"}];
+
+const DEMO=[{id:"proj-1",name:"Implantação ERP",color:"#58A6FF",description:"Migração do sistema legado para novo ERP",tasks:[
+  {id:"t1",name:"Levantamento de requisitos",group:"Fase 1",planned:["2026-05-01","2026-05-15"],actual:["2026-05-01","2026-05-18"],logs:{"2026-05-12":[{tag:"delay",text:"Stakeholders indisponíveis",ts:1747000000}]}},
+  {id:"t2",name:"Configuração do ambiente",group:"Fase 1",planned:["2026-05-10","2026-05-25"],actual:["2026-05-13",null],logs:{}},
+  {id:"t3",name:"Migração de dados",group:"Fase 2",planned:["2026-05-20","2026-06-10"],actual:[null,null],logs:{}},
+  {id:"t4",name:"Testes de integração",group:"Fase 2",planned:["2026-06-05","2026-06-30"],actual:[null,null],logs:{}},
+  {id:"t5",name:"Treinamento usuários",group:"Fase 3",planned:["2026-06-20","2026-07-10"],actual:[null,null],logs:{}},
+  {id:"t6",name:"Go-live",group:"Fase 3",planned:["2026-07-15","2026-07-20"],actual:[null,null],logs:{}}
+]}];
+
+const parseDate=s=>s?new Date(s+"T00:00:00"):null;
+const addDays=(d,n)=>{const r=new Date(d);r.setDate(r.getDate()+n);return r;};
+const diffDays=(a,b)=>Math.round((b-a)/(1000*60*60*24));
+const today=()=>{const d=new Date();d.setHours(0,0,0,0);return d;};
+const fmtDate=d=>d instanceof Date?d.toLocaleDateString("pt-BR",{day:"2-digit",month:"short",year:"numeric"}):String(d);
+
+function taskStatus(t){
+  const now=today(),ps=parseDate(t.planned[0]),pe=parseDate(t.planned[1]),as=parseDate(t.actual[0]),ae=parseDate(t.actual[1]);
+  if(ae)return"done";if(!as)return(ps&&now>ps)?"late":"pending";
+  if(pe&&now>pe)return"late";if(pe&&now>=addDays(pe,-3))return"risk";return"running";
+}
+function projectProgress(p){return p.tasks.length?Math.round(p.tasks.filter(t=>taskStatus(t)==="done").length/p.tasks.length*100):0;}
+function buildTimeAxis(tasks){
+  const dates=tasks.flatMap(t=>[t.planned[0],t.planned[1],t.actual[0],t.actual[1]]).filter(Boolean).map(parseDate);
+  if(!dates.length){const s=today();return{start:s,end:addDays(s,30),cols:30};}
+  const s=addDays(new Date(Math.min(...dates)),-5),e=addDays(new Date(Math.max(...dates)),10);
+  return{start:s,end:e,cols:diffDays(s,e)};
+}
+function dayX(start,date,cw){const d=parseDate(date);return d?diffDays(start,d)*cw:null;}
+function logDotColor(entries){for(const p of["block","delay","done","note"]){if(entries.find(e=>e.tag===p))return LOG_TAGS.find(t=>t.id===p).color;}return C.accent;}
+
+function TokenSetup(){
+  const [val,setVal]=useState("");
+  const save=()=>{if(!val.trim())return;localStorage.setItem("gh_gantt_token",val.trim());window.location.reload();};
+  return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:C.bg,flexDirection:"column",gap:16,padding:24}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+        <div style={{width:10,height:10,borderRadius:"50%",background:C.accent,boxShadow:`0 0 10px ${C.accent}`}}/>
+        <span style={{fontSize:16,fontWeight:700,letterSpacing:2,color:C.text,fontFamily:"monospace"}}>GANTT TRACKER</span>
+      </div>
+      <div style={{background:C.surface,border:`1px solid ${C.borderStrong}`,borderRadius:12,padding:28,width:420,maxWidth:"95vw"}}>
+        <h3 style={{color:C.text,margin:"0 0 8px",fontSize:15}}>Configuração inicial</h3>
+        <p style={{color:C.textMuted,fontSize:13,margin:"0 0 20px",lineHeight:1.6}}>
+          Informe seu GitHub Personal Access Token.<br/>
+          Fica salvo só neste navegador, nunca vai para o repositório.
+        </p>
+        <label style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+          <span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>GitHub Token</span>
+          <input value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&save()}
+            placeholder="ghp_..." autoFocus
+            style={{background:C.bg,border:`1px solid ${C.borderStrong}`,borderRadius:6,color:C.text,padding:"10px 12px",fontSize:13,outline:"none",fontFamily:"monospace",width:"100%",boxSizing:"border-box"}}/>
+        </label>
+        <p style={{color:C.textDim,fontSize:11,margin:"0 0 16px",lineHeight:1.5}}>
+          Gere em: <strong style={{color:C.textMuted}}>github.com/settings/tokens</strong> → Generate new token (classic) → marque <strong style={{color:C.textMuted}}>repo</strong>
+        </p>
+        <button onClick={save} disabled={!val.trim()}
+          style={{width:"100%",padding:"10px",borderRadius:7,border:"none",background:val.trim()?C.accent:"#333",color:val.trim()?"#000":C.textDim,cursor:val.trim()?"pointer":"default",fontSize:13,fontWeight:600}}>
+          Salvar e continuar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GanttChart({project,onLogClick}){
+  const cw=28,{start,end,cols}=buildTimeAxis(project.tasks),todayX=diffDays(start,today())*cw;
+  const rowH=48,labelW=220,monthH=28,dayH=26,headerH=monthH+dayH+2;
+  const totalW=labelW+cols*cw,totalH=headerH+project.tasks.length*rowH+32;
+  const monthSpans=[];let cur=new Date(start.getFullYear(),start.getMonth(),1),mi=0;
+  while(cur<=end){const next=new Date(cur.getFullYear(),cur.getMonth()+1,1);const x0=Math.max(0,diffDays(start,cur))*cw,x1=Math.min(cols,diffDays(start,next))*cw;monthSpans.push({x:x0,w:x1-x0,label:cur.toLocaleDateString("pt-BR",{month:"long",year:"numeric"}),idx:mi});cur=next;mi++;}
+  return(
+    <div style={{overflowX:"auto",position:"relative"}}>
+      <svg width={totalW} height={totalH} style={{fontFamily:"monospace",userSelect:"none",display:"block"}}>
+        <rect x={0} y={0} width={totalW} height={headerH} fill={C.surface}/>
+        {monthSpans.map((m,i)=><g key={i}><rect x={labelW+m.x} y={0} width={m.w} height={monthH} fill={i%2===0?"rgba(88,166,255,0.06)":"rgba(88,166,255,0.02)"}/>{m.x>0&&<line x1={labelW+m.x} y1={0} x2={labelW+m.x} y2={monthH} stroke={C.borderStrong} strokeWidth="1"/>}<text x={labelW+m.x+6} y={monthH/2+1} fill={C.accent} fontSize="11" fontWeight="600" dominantBaseline="middle">{m.label.toUpperCase()}</text></g>)}
+        <line x1={labelW} y1={monthH} x2={totalW} y2={monthH} stroke={C.borderStrong} strokeWidth="1"/>
+        {Array.from({length:cols}).map((_,i)=>{const d=addDays(start,i),wk=d.getDay()===0||d.getDay()===6,isMon=d.getDay()===1,dn=d.getDate();return<g key={i}>{wk&&<rect x={labelW+i*cw} y={monthH} width={cw} height={dayH} fill="rgba(255,255,255,0.04)"/>}{isMon&&<line x1={labelW+i*cw} y1={monthH} x2={labelW+i*cw} y2={headerH} stroke={C.borderStrong} strokeWidth="0.8"/>}<text x={labelW+i*cw+cw/2} y={monthH+dayH/2+1} fill={dn===1?C.text:wk?C.textDim:C.textMuted} fontSize={dn===1?"10":"9"} fontWeight={dn===1?"700":"400"} textAnchor="middle" dominantBaseline="middle">{dn}</text></g>;})}
+        <line x1={0} y1={headerH} x2={totalW} y2={headerH} stroke={C.borderStrong} strokeWidth="1.5"/>
+        <rect x={0} y={0} width={labelW} height={headerH} fill={C.surface}/>
+        <line x1={labelW} y1={0} x2={labelW} y2={totalH} stroke={C.borderStrong} strokeWidth="1"/>
+        <text x={12} y={headerH/2+1} fill={C.textDim} fontSize="10" dominantBaseline="middle">TAREFA</text>
+        {Array.from({length:cols}).map((_,i)=>{const wk=addDays(start,i).getDay()===0||addDays(start,i).getDay()===6;return<rect key={i} x={labelW+i*cw} y={headerH} width={cw} height={totalH-headerH} fill={wk?"rgba(255,255,255,0.018)":"transparent"}/>;} )}
+        {Array.from({length:cols+1}).map((_,i)=><line key={i} x1={labelW+i*cw} y1={headerH} x2={labelW+i*cw} y2={totalH} stroke={C.border} strokeWidth="0.5"/>)}
+        {project.tasks.map((task,i)=>{
+          const y=headerH+i*rowH,st=taskStatus(task),bc=STATUS[st].color;
+          const px1=task.planned[0]?labelW+dayX(start,task.planned[0],cw):null,px2=task.planned[1]?labelW+dayX(start,task.planned[1],cw)+cw:null;
+          const ax1=task.actual[0]?labelW+dayX(start,task.actual[0],cw):null,ax2raw=task.actual[1]?labelW+dayX(start,task.actual[1],cw)+cw:null;
+          const ax2eff=ax1&&!task.actual[1]?labelW+Math.min(diffDays(start,today()),cols)*cw+cw:ax2raw;
+          const logDots=Object.entries(task.logs||{}).map(([date,entries])=>{const dx=dayX(start,date,cw);if(dx===null||dx<0||dx>cols*cw)return null;return{x:labelW+dx+cw/2,color:logDotColor(entries),date};}).filter(Boolean);
+          return(<g key={task.id}>
+            <rect x={0} y={y} width={totalW} height={rowH} fill={i%2===0?"rgba(255,255,255,0.012)":"transparent"}/>
+            <text x={12} y={y+rowH/2+1} fill={C.text} fontSize="12" dominantBaseline="middle" fontFamily="system-ui,sans-serif">{task.name.length>24?task.name.slice(0,23)+"…":task.name}</text>
+            <circle cx={labelW-10} cy={y+rowH/2} r={4} fill={bc}/>
+            {px1!==null&&px2!==null&&<rect x={px1} y={y+rowH/2-6} width={px2-px1} height={8} rx={3} fill="rgba(255,255,255,0.06)" stroke={C.borderStrong} strokeWidth="1"/>}
+            {ax1!==null&&ax2eff!==null&&<rect x={ax1} y={y+rowH/2-7} width={ax2eff-ax1} height={10} rx={3} fill={bc} opacity={task.actual[1]?"1":"0.85"}/>}
+            {st==="late"&&ax1&&px2&&ax2eff>px2&&<rect x={px2} y={y+rowH/2-4} width={ax2eff-px2} height={6} rx={2} fill={C.danger} opacity="0.35"/>}
+            {logDots.map((dot,di)=><g key={di} style={{cursor:"pointer"}} onClick={()=>onLogClick(task,dot.date)}><rect x={dot.x-8} y={y+4} width={16} height={rowH-8} fill="transparent"/><circle cx={dot.x} cy={y+10} r={4} fill={dot.color} opacity="0.9"/><line x1={dot.x} y1={y+14} x2={dot.x} y2={y+rowH/2-8} stroke={dot.color} strokeWidth="1" opacity="0.4"/></g>)}
+            {Array.from({length:cols}).map((_,di)=>{const dateStr=addDays(start,di).toISOString().slice(0,10);if((task.logs||{})[dateStr]?.length>0)return null;return<rect key={di} x={labelW+di*cw} y={y} width={cw} height={rowH} fill="transparent" style={{cursor:"cell"}} onClick={()=>onLogClick(task,dateStr)}/>;} )}
+            <line x1={0} y1={y+rowH} x2={totalW} y2={y+rowH} stroke={C.border} strokeWidth="0.5"/>
+          </g>);
+        })}
+        {todayX>=0&&todayX<=cols*cw&&<g pointerEvents="none"><line x1={labelW+todayX+cw/2} y1={headerH} x2={labelW+todayX+cw/2} y2={totalH} stroke={C.today} strokeWidth="6" opacity="0.12"/><line x1={labelW+todayX+cw/2} y1={headerH} x2={labelW+todayX+cw/2} y2={totalH} stroke={C.today} strokeWidth="2"/><rect x={labelW+todayX+cw/2-16} y={headerH-18} width={32} height={18} rx={4} fill={C.today}/><text x={labelW+todayX+cw/2} y={headerH-9} fill="white" fontSize="9" textAnchor="middle" dominantBaseline="middle" fontWeight="700">HOJE</text></g>}
+      </svg>
+    </div>
+  );
+}
+
+function LogPanel({task,date,onClose,onSave}){
+  const [entries,setEntries]=useState(()=>(task.logs?.[date]||[]));
+  const [text,setText]=useState(""), [tag,setTag]=useState("note"), ta=useRef();
+  const add=()=>{if(!text.trim())return;const next=[...entries,{tag,text:text.trim(),ts:Date.now()}];setEntries(next);onSave(date,next);setText("");ta.current?.focus();};
+  const remove=i=>{const next=entries.filter((_,idx)=>idx!==i);setEntries(next);onSave(date,next);};
+  const tagObj=id=>LOG_TAGS.find(t=>t.id===id);
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:200,display:"flex"}} onClick={onClose}>
+      <div style={{flex:1}}/>
+      <div onClick={e=>e.stopPropagation()} style={{width:360,background:C.surface,borderLeft:`1px solid ${C.borderStrong}`,display:"flex",flexDirection:"column",height:"100%",boxShadow:"-8px 0 32px rgba(0,0,0,0.5)"}}>
+        <div style={{padding:"16px 18px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+            <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Diário · {fmtDate(parseDate(date))}</div><div style={{fontSize:15,color:C.text,fontWeight:600}}>{task.name}</div><div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{task.group}</div></div>
+            <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textMuted,cursor:"pointer",fontSize:18,padding:4}}>✕</button>
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"14px 18px",display:"flex",flexDirection:"column",gap:10}}>
+          {entries.length===0&&<div style={{textAlign:"center",color:C.textDim,fontSize:13,marginTop:40}}><div style={{fontSize:28,marginBottom:8}}>📝</div>Nenhum registro. Adicione abaixo.</div>}
+          {entries.map((e,i)=>{const t=tagObj(e.tag);return(<div key={i} style={{background:C.bg,borderRadius:8,padding:"10px 12px",border:`1px solid ${C.border}`,borderLeftColor:t?.color||C.accent,borderLeftWidth:3,position:"relative"}}><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}><span>{t?.icon}</span><span style={{fontSize:11,color:t?.color,fontWeight:600}}>{t?.label}</span><span style={{fontSize:10,color:C.textDim,marginLeft:"auto"}}>{new Date(e.ts).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</span></div><p style={{margin:0,fontSize:13,color:C.text,lineHeight:1.6}}>{e.text}</p><button onClick={()=>remove(i)} style={{position:"absolute",top:8,right:8,background:"transparent",border:"none",color:C.textDim,cursor:"pointer",fontSize:12,opacity:0.6,padding:2}}>✕</button></div>);})}
+        </div>
+        <div style={{padding:"14px 18px",borderTop:`1px solid ${C.border}`}}>
+          <div style={{display:"flex",gap:6,marginBottom:10}}>{LOG_TAGS.map(t=><button key={t.id} onClick={()=>setTag(t.id)} style={{flex:1,padding:"5px 4px",borderRadius:6,cursor:"pointer",fontSize:11,border:`1px solid ${tag===t.id?t.color:C.border}`,background:tag===t.id?`${t.color}18`:"transparent",color:tag===t.id?t.color:C.textMuted}}>{t.icon} {t.label}</button>)}</div>
+          <textarea ref={ta} value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&e.ctrlKey)add();}} placeholder="Descreva o ocorrido… (Ctrl+Enter)" rows={3} style={{width:"100%",boxSizing:"border-box",background:C.bg,border:`1px solid ${C.borderStrong}`,borderRadius:7,color:C.text,padding:"9px 11px",fontSize:13,resize:"vertical",outline:"none",lineHeight:1.5,fontFamily:"inherit"}}/>
+          <button onClick={add} disabled={!text.trim()} style={{width:"100%",marginTop:8,padding:"9px",borderRadius:7,border:"none",background:text.trim()?C.accent:"#1a1a1a",color:text.trim()?"#000":C.textDim,cursor:text.trim()?"pointer":"default",fontSize:13,fontWeight:600}}>Registrar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskModal({task,onSave,onClose,onDelete}){
+  const [t,setT]=useState({...task,planned:[...task.planned],actual:[...task.actual]});
+  const setF=(k,v)=>setT(p=>({...p,[k]:v}));
+  const setD=(k,i,v)=>setT(p=>{const a=[...p[k]];a[i]=v||null;return{...p,[k]:a};});
+  const inp={background:C.bg,border:`1px solid ${C.borderStrong}`,borderRadius:6,color:C.text,padding:"8px 10px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:C.surface,border:`1px solid ${C.borderStrong}`,borderRadius:12,padding:28,width:460,maxWidth:"95vw"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}><span style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:1}}>Editar Tarefa</span><button onClick={onClose} style={{background:"transparent",border:"none",color:C.textMuted,cursor:"pointer",fontSize:16}}>✕</button></div>
+        <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:18}}>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>Nome</span><input value={t.name} onChange={e=>setF("name",e.target.value)} style={{...inp,fontSize:14,fontWeight:500}}/></label>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>Grupo / Fase</span><input value={t.group||""} onChange={e=>setF("group",e.target.value)} style={inp} placeholder="Ex: Fase 1"/></label>
+        </div>
+        <div style={{height:1,background:C.border,margin:"0 0 18px"}}/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+          {[["Início planejado","planned",0],["Fim planejado","planned",1],["Início real","actual",0],["Fim real","actual",1]].map(([label,key,idx])=>(
+            <label key={label} style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>{label}</span><input type="date" value={t[key][idx]||""} onChange={e=>setD(key,idx,e.target.value)} style={{...inp,colorScheme:"dark"}}/></label>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:24,justifyContent:"space-between",alignItems:"center"}}>
+          <button onClick={()=>{if(window.confirm("Remover esta tarefa?"))onDelete(t.id)}} style={{padding:"8px 14px",borderRadius:6,border:`1px solid ${C.danger}44`,background:"transparent",color:C.danger,cursor:"pointer",fontSize:12}}>Remover</button>
+          <div style={{display:"flex",gap:10}}>
+            <button onClick={onClose} style={{padding:"8px 18px",borderRadius:6,border:`1px solid ${C.borderStrong}`,background:"transparent",color:C.textMuted,cursor:"pointer",fontSize:13}}>Cancelar</button>
+            <button onClick={()=>onSave(t)} disabled={!t.name.trim()} style={{padding:"8px 18px",borderRadius:6,border:"none",background:t.name.trim()?C.accent:"#333",color:t.name.trim()?"#000":C.textDim,cursor:t.name.trim()?"pointer":"default",fontSize:13,fontWeight:600}}>Salvar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewProjectModal({onSave,onClose}){
+  const [name,setName]=useState(""), [desc,setDesc]=useState(""), [color,setColor]=useState("#58A6FF");
+  const cores=["#58A6FF","#3FB950","#D29922","#F85149","#BC8CFF","#39D353","#FF9500"];
+  const inp={background:C.bg,border:`1px solid ${C.borderStrong}`,borderRadius:6,color:C.text,padding:"9px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:C.surface,border:`1px solid ${C.borderStrong}`,borderRadius:12,padding:28,width:400}} onClick={e=>e.stopPropagation()}>
+        <h3 style={{color:C.text,margin:"0 0 20px",fontSize:16}}>Novo Projeto</h3>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          {[["Nome",name,setName,"Nome do projeto"],["Descrição",desc,setDesc,"Opcional"]].map(([l,v,fn,ph])=><label key={l} style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>{l}</span><input value={v} onChange={e=>fn(e.target.value)} placeholder={ph} style={inp}/></label>)}
+          <div><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:8}}>Cor</span><div style={{display:"flex",gap:8}}>{cores.map(c=><div key={c} onClick={()=>setColor(c)} style={{width:24,height:24,borderRadius:"50%",background:c,cursor:"pointer",boxShadow:color===c?`0 0 0 2px white,0 0 0 4px ${c}`:"none"}}/>)}</div></div>
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:24,justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{padding:"8px 18px",borderRadius:6,border:`1px solid ${C.borderStrong}`,background:"transparent",color:C.textMuted,cursor:"pointer",fontSize:13}}>Cancelar</button>
+          <button disabled={!name.trim()} onClick={()=>name.trim()&&onSave({name:name.trim(),description:desc,color})} style={{padding:"8px 18px",borderRadius:6,border:"none",background:name.trim()?C.accent:"#333",color:name.trim()?"#000":C.textDim,cursor:name.trim()?"pointer":"default",fontSize:13,fontWeight:600}}>Criar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewTaskModal({onSave,onClose}){
+  const [name,setName]=useState(""), [group,setGroup]=useState(""), [ps,setPs]=useState(""), [pe,setPe]=useState("");
+  const inp={background:C.bg,border:`1px solid ${C.borderStrong}`,borderRadius:6,color:C.text,padding:"9px 12px",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:C.surface,border:`1px solid ${C.borderStrong}`,borderRadius:12,padding:28,width:400}} onClick={e=>e.stopPropagation()}>
+        <h3 style={{color:C.text,margin:"0 0 20px",fontSize:16}}>Nova Tarefa</h3>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          {[["Nome",name,setName,"Ex: Levantamento de requisitos"],["Grupo / Fase",group,setGroup,"Ex: Fase 1"]].map(([l,v,fn,ph])=><label key={l} style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>{l}</span><input value={v} onChange={e=>fn(e.target.value)} placeholder={ph} style={inp}/></label>)}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            {[["Início",ps,setPs],["Fim",pe,setPe]].map(([l,v,fn])=><label key={l} style={{display:"flex",flexDirection:"column",gap:6}}><span style={{color:C.textMuted,fontSize:11,textTransform:"uppercase",letterSpacing:1}}>{l} planejado</span><input type="date" value={v} onChange={e=>fn(e.target.value)} style={{...inp,colorScheme:"dark"}}/></label>)}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:24,justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{padding:"8px 18px",borderRadius:6,border:`1px solid ${C.borderStrong}`,background:"transparent",color:C.textMuted,cursor:"pointer",fontSize:13}}>Cancelar</button>
+          <button disabled={!name.trim()||!ps||!pe} onClick={()=>name.trim()&&ps&&pe&&onSave({name,group,ps,pe})} style={{padding:"8px 18px",borderRadius:6,border:"none",background:(name.trim()&&ps&&pe)?C.accent:"#333",color:(name.trim()&&ps&&pe)?"#000":C.textDim,cursor:(name.trim()&&ps&&pe)?"pointer":"default",fontSize:13,fontWeight:600}}>Adicionar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  if(!getToken()) return <TokenSetup/>;
+
+  const [projects,setProjects]=useState([]);
+  const [activeId,setActiveId]=useState(null);
+  const [sha,setSha]=useState(null);
+  const [saveStatus,setSaveStatus]=useState("idle");
+  const [loadStatus,setLoadStatus]=useState("loading");
+  const [editTask,setEditTask]=useState(null);
+  const [showNewProject,setShowNewProject]=useState(false);
+  const [showNewTask,setShowNewTask]=useState(false);
+  const [logPanel,setLogPanel]=useState(null);
+
+  useEffect(()=>{
+    ghLoad().then(res=>{
+      if(res&&res.data){setProjects(res.data);setSha(res.sha);setActiveId(res.data[0]?.id||null);setLoadStatus("ok");}
+      else if(res){setSha(res.sha);setProjects(DEMO);setActiveId(DEMO[0].id);setLoadStatus("ok");}
+      else{setProjects(DEMO);setActiveId(DEMO[0].id);setLoadStatus("error");}
+    }).catch(()=>{setProjects(DEMO);setActiveId(DEMO[0].id);setLoadStatus("error");});
+  },[]);
+
+  const saveTimer=useRef(null), shaRef=useRef(sha);
+  useEffect(()=>{shaRef.current=sha;},[sha]);
+
+  const triggerSave=useCallback((data)=>{
+    if(loadStatus==="loading")return;
+    clearTimeout(saveTimer.current); setSaveStatus("saving");
+    saveTimer.current=setTimeout(async()=>{
+      try{const s=await ghSave(data,shaRef.current);setSha(s);shaRef.current=s;setSaveStatus("saved");setTimeout(()=>setSaveStatus("idle"),2500);}
+      catch(e){setSaveStatus("error");console.error(e);}
+    },1500);
+  },[loadStatus]);
+
+  const upd=(next)=>{setProjects(next);triggerSave(next);};
+  const active=projects.find(p=>p.id===activeId)||projects[0];
+
+  const updateTask=t=>{upd(projects.map(p=>p.id===activeId?{...p,tasks:p.tasks.map(x=>x.id===t.id?t:x)}:p));setEditTask(null);};
+  const deleteTask=id=>{upd(projects.map(p=>p.id===activeId?{...p,tasks:p.tasks.filter(t=>t.id!==id)}:p));setEditTask(null);};
+  const addProject=({name,description,color})=>{const id="proj-"+Date.now();const next=[...projects,{id,name,color,description,tasks:[]}];upd(next);setActiveId(id);setShowNewProject(false);};
+  const deleteProject=id=>{if(projects.length<=1){alert("Não é possível remover o último projeto.");return;}const r=projects.filter(p=>p.id!==id);upd(r);if(activeId===id)setActiveId(r[0].id);};
+  const addTask=({name,group,ps,pe})=>{const id="t"+Date.now();upd(projects.map(p=>p.id===activeId?{...p,tasks:[...p.tasks,{id,name,group,planned:[ps,pe],actual:[null,null],logs:{}}]}:p));setShowNewTask(false);};
+  const saveLog=(taskId,date,entries)=>{
+    const next=projects.map(p=>{if(p.id!==activeId)return p;return{...p,tasks:p.tasks.map(t=>{if(t.id!==taskId)return t;const logs={...(t.logs||{})};if(entries.length===0)delete logs[date];else logs[date]=entries;return{...t,logs};})};});
+    upd(next); setLogPanel(lp=>lp?{...lp,task:{...lp.task,logs:{...(lp.task.logs||{}),[date]:entries}}}:null);
+  };
+  const handleLogClick=(task,date)=>{const fresh=active.tasks.find(t=>t.id===task.id)||task;setLogPanel({task:fresh,date});};
+
+  const stats=active?.tasks.reduce((acc,t)=>{acc[taskStatus(t)]=(acc[taskStatus(t)]||0)+1;return acc;},{})||{};
+  const totalLogs=active?.tasks.reduce((n,t)=>n+Object.keys(t.logs||{}).length,0)||0;
+  const saveInd={saving:{color:C.warning,text:"Salvando…"},saved:{color:C.success,text:"✓ Salvo"},error:{color:C.danger,text:"⚠ Erro ao salvar"}}[saveStatus]||null;
+
+  if(loadStatus==="loading")return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:C.bg,flexDirection:"column",gap:12}}>
+      <div style={{width:8,height:8,borderRadius:"50%",background:C.accent,boxShadow:`0 0 12px ${C.accent}`}}/>
+      <span style={{color:C.textMuted,fontSize:13}}>Carregando projetos…</span>
+    </div>
+  );
+
+  return(
+    <div style={{display:"flex",height:"100vh",background:C.bg,color:C.text,fontFamily:"system-ui,-apple-system,sans-serif",overflow:"hidden"}}>
+      <div style={{width:240,flexShrink:0,background:C.surface,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{padding:"16px 16px 12px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:C.accent,boxShadow:`0 0 8px ${C.accent}`}}/>
+            <span style={{fontSize:13,fontWeight:700,letterSpacing:2,color:C.text,fontFamily:"monospace"}}>GANTT</span>
+            <span style={{fontSize:11,color:C.textMuted,marginLeft:2,fontFamily:"monospace"}}>TRACKER</span>
+          </div>
+          {saveInd&&<div style={{fontSize:10,color:saveInd.color,paddingLeft:16}}>{saveInd.text}</div>}
+          <button onClick={()=>{localStorage.removeItem("gh_gantt_token");window.location.reload();}}
+            style={{marginTop:4,marginLeft:16,background:"transparent",border:"none",color:C.textDim,cursor:"pointer",fontSize:10,padding:0,textDecoration:"underline"}}>trocar token</button>
+        </div>
+        <div style={{padding:"14px 12px 8px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <span style={{fontSize:10,color:C.textDim,textTransform:"uppercase",letterSpacing:1.5,fontWeight:600}}>Projetos ({projects.length})</span>
+          <button onClick={()=>setShowNewProject(true)} style={{background:"transparent",border:"none",color:C.textMuted,cursor:"pointer",fontSize:18,lineHeight:1,padding:0}}>+</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {projects.map(p=>{
+            const prog=projectProgress(p),isActive=p.id===activeId,late=p.tasks.filter(t=>taskStatus(t)==="late").length,logs=p.tasks.reduce((n,t)=>n+Object.keys(t.logs||{}).length,0);
+            return(<div key={p.id} onClick={()=>setActiveId(p.id)} style={{padding:"10px 12px",cursor:"pointer",position:"relative",background:isActive?"rgba(88,166,255,0.07)":"transparent",borderLeft:isActive?`3px solid ${p.color}`:"3px solid transparent"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:p.color,flexShrink:0}}/>
+                <span style={{fontSize:13,color:isActive?C.text:C.textMuted,fontWeight:isActive?600:400,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+                {late>0&&<span style={{fontSize:10,background:"rgba(248,81,73,0.15)",color:C.danger,borderRadius:10,padding:"1px 6px"}}>{late} atr.</span>}
+              </div>
+              <div style={{height:2,background:C.border,borderRadius:1,overflow:"hidden"}}><div style={{height:"100%",width:`${prog}%`,background:p.color,borderRadius:1}}/></div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:2}}>
+                <span style={{fontSize:10,color:C.textDim}}>{prog}% concluído</span>
+                {logs>0&&<span style={{fontSize:10,color:C.textDim}}>📝 {logs}</span>}
+              </div>
+              {isActive&&<button onClick={e=>{e.stopPropagation();deleteProject(p.id)}} style={{position:"absolute",right:8,top:8,background:"transparent",border:"none",color:C.textDim,cursor:"pointer",fontSize:12,opacity:0.5,padding:0}}>✕</button>}
+            </div>);
+          })}
+        </div>
+        <div style={{borderTop:`1px solid ${C.border}`,padding:"12px"}}>
+          <div style={{fontSize:10,color:C.textDim,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Legenda</div>
+          {Object.entries(STATUS).map(([k,v])=><div key={k} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><div style={{width:10,height:4,borderRadius:2,background:v.color}}/><span style={{fontSize:11,color:C.textMuted}}>{v.label}</span></div>)}
+          <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+            <div style={{fontSize:10,color:C.textDim,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Marcadores</div>
+            {LOG_TAGS.map(t=><div key={t.id} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><div style={{width:8,height:8,borderRadius:"50%",background:t.color}}/><span style={{fontSize:11,color:C.textMuted}}>{t.icon} {t.label}</span></div>)}
+          </div>
+        </div>
+      </div>
+
+      {active&&(
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{padding:"16px 24px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:16,flexShrink:0}}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}><div style={{width:10,height:10,borderRadius:"50%",background:active.color,boxShadow:`0 0 8px ${active.color}80`}}/><h1 style={{margin:0,fontSize:18,fontWeight:700}}>{active.name}</h1></div>
+              {active.description&&<p style={{margin:"3px 0 0 20px",fontSize:12,color:C.textMuted}}>{active.description}</p>}
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {[[stats.done||0,"Concluídas",C.success],[stats.running||0,"Em andamento",C.accent],[stats.late||0,"Atrasadas",C.danger],[stats.risk||0,"Em risco",C.warning],[stats.pending||0,"Pendentes",C.textDim]].map(([n,l,c])=>n>0&&<div key={l} style={{padding:"4px 10px",borderRadius:20,fontSize:12,background:`${c}18`,color:c,border:`1px solid ${c}33`}}>{n} {l}</div>)}
+              {totalLogs>0&&<div style={{padding:"4px 10px",borderRadius:20,fontSize:12,background:"rgba(188,140,255,0.1)",color:C.purple,border:`1px solid ${C.purple}33`}}>📝 {totalLogs} registros</div>}
+            </div>
+            <button onClick={()=>setShowNewTask(true)} style={{padding:"8px 16px",borderRadius:7,border:`1px solid ${C.accent}`,background:"transparent",color:C.accent,cursor:"pointer",fontSize:13,fontWeight:600}}>+ Tarefa</button>
+          </div>
+          <div style={{flex:1,overflow:"auto",padding:"8px 0 0"}}>
+            {active.tasks.length===0?(<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"60%",gap:12}}><span style={{fontSize:32}}>📋</span><p style={{color:C.textMuted,fontSize:14}}>Nenhuma tarefa. Clique em "+ Tarefa" para começar.</p></div>):(<GanttChart project={active} onLogClick={handleLogClick}/>)}
+          </div>
+          {active.tasks.length>0&&(
+            <div style={{borderTop:`1px solid ${C.border}`,padding:"12px 24px",maxHeight:180,overflowY:"auto",flexShrink:0}}>
+              <div style={{fontSize:10,color:C.textDim,textTransform:"uppercase",letterSpacing:1.5,marginBottom:10,fontWeight:600}}>Tarefas — clique para editar · clique no Gantt para registrar</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:6}}>
+                {active.tasks.map(task=>{
+                  const st=taskStatus(task),sv=STATUS[st],lc=Object.keys(task.logs||{}).length;
+                  return(<div key={task.id} onClick={()=>setEditTask(task)} style={{padding:"8px 12px",borderRadius:8,cursor:"pointer",background:"rgba(255,255,255,0.03)",border:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:10}} onMouseOver={e=>e.currentTarget.style.borderColor=sv.color} onMouseOut={e=>e.currentTarget.style.borderColor=C.border}>
+                    <div style={{width:6,height:6,borderRadius:"50%",background:sv.color,flexShrink:0}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.name}</div>
+                      <div style={{fontSize:10,color:C.textMuted}}>{task.group} · {task.planned[0]||"?"} → {task.planned[1]||"?"}{task.actual[0]&&<span style={{color:sv.color}}> · real: {task.actual[0]}{task.actual[1]?" → "+task.actual[1]:""}</span>}</div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>{lc>0&&<span style={{fontSize:10,color:C.purple}}>📝{lc}</span>}<span style={{fontSize:10,color:sv.color,whiteSpace:"nowrap"}}>{sv.label}</span></div>
+                  </div>);
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {editTask&&<TaskModal task={editTask} onSave={updateTask} onDelete={deleteTask} onClose={()=>setEditTask(null)}/>}
+      {showNewProject&&<NewProjectModal onSave={addProject} onClose={()=>setShowNewProject(false)}/>}
+      {showNewTask&&<NewTaskModal onSave={addTask} onClose={()=>setShowNewTask(false)}/>}
+      {logPanel&&<LogPanel task={logPanel.task} date={logPanel.date} onClose={()=>setLogPanel(null)} onSave={(date,entries)=>saveLog(logPanel.task.id,date,entries)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
