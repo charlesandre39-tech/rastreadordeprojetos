@@ -1,1 +1,110 @@
-[]
+[
+  {
+    "id": "proj-1",
+    "name": "Implantação ERP",
+    "color": "#58A6FF",
+    "description": "Migração do sistema legado para novo ERP",
+    "tasks": [
+      {
+        "id": "t1",
+        "name": "Levantamento de requisitos",
+        "group": "Fase 1",
+        "planned": [
+          "2026-05-01",
+          "2026-05-15"
+        ],
+        "actual": [
+          "2026-05-01",
+          "2026-05-18"
+        ],
+        "logs": {
+          "2026-05-12": [
+            {
+              "tag": "delay",
+              "text": "Stakeholders indisponíveis",
+              "ts": 1747000000
+            }
+          ]
+        }
+      },
+      {
+        "id": "t2",
+        "name": "Configuração do ambiente",
+        "group": "Fase 1",
+        "planned": [
+          "2026-05-10",
+          "2026-05-25"
+        ],
+        "actual": [
+          "2026-05-13",
+          null
+        ],
+        "logs": {
+          "2026-06-25": [
+            {
+              "tag": "block",
+              "text": "adasdaasdfasdf",
+              "ts": 1782485913859
+            }
+          ]
+        }
+      },
+      {
+        "id": "t3",
+        "name": "Migração de dados",
+        "group": "Fase 2",
+        "planned": [
+          "2026-05-20",
+          "2026-06-10"
+        ],
+        "actual": [
+          null,
+          null
+        ],
+        "logs": {}
+      },
+      {
+        "id": "t4",
+        "name": "Testes de integração",
+        "group": "Fase 2",
+        "planned": [
+          "2026-06-05",
+          "2026-06-30"
+        ],
+        "actual": [
+          null,
+          null
+        ],
+        "logs": {}
+      },
+      {
+        "id": "t5",
+        "name": "Treinamento usuários",
+        "group": "Fase 3",
+        "planned": [
+          "2026-06-20",
+          "2026-07-10"
+        ],
+        "actual": [
+          null,
+          null
+        ],
+        "logs": {}
+      },
+      {
+        "id": "t6",
+        "name": "Go-live",
+        "group": "Fase 3",
+        "planned": [
+          "2026-07-15",
+          "2026-07-20"
+        ],
+        "actual": [
+          null,
+          null
+        ],
+        "logs": {}
+      }
+    ]
+  }
+]
